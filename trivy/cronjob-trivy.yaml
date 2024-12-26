@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trivy-k8s-scan
+  namespace: default
+spec:
+  schedule: "37 20 * * *" 
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: trivy-sa
+          containers:
+          - name: trivy-k8s
+            image: aquasec/trivy:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache curl &&
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" &&
+              chmod +x kubectl &&
+              mv kubectl /usr/local/bin/ &&
+              echo "kubectl installed successfully" &&
+              TOTAL_NS=$(kubectl get ns -o jsonpath='{.items[*].metadata.name}' | wc -w) &&
+              curl -X POST https://slack.com/api/chat.postMessage \
+                -H "Authorization: Bearer $(cat /var/secrets/SLACK-TOKEN)" \
+                -H "Content-Type: application/json" \
+                -d '{
+                    "channel": "#security-aws-eks",
+                    "text": "Total number of namespaces are '"$TOTAL_NS"'. Running Trivy in each namespace"
+                }' &&
+              for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do
+                DATE_TIME=$(date +%Y-%m-%d_%H-%M-%S) &&
+                FILENAME="/tmp/trivy_${ns}_${DATE_TIME}.txt" &&
+                RESOURCE_COUNT=$(kubectl get all -n $ns --no-headers 2>/dev/null | wc -l) &&
+                if [ "$RESOURCE_COUNT" -eq 0 ]; then
+                  curl -X POST https://slack.com/api/chat.postMessage \
+                    -H "Authorization: Bearer $(cat /var/secrets/SLACK-TOKEN)" \
+                    -H "Content-Type: application/json" \
+                    -d '{
+                        "channel": "#security-aws-eks",
+                        "text": "There are no resources in namespace '"$ns"' to scan."
+                    }';
+                else
+                  echo "Scanning namespace: $ns" &&
+                  trivy k8s --include-namespaces $ns --report all --severity CRITICAL --format table > $FILENAME &&
+                  if [ -f $FILENAME ]; then
+                    curl -F file=@$FILENAME \
+                        -F "channels=#security-aws-eks" \
+                        -F "initial_comment=Trivy scan results for namespace: $ns" \
+                        -F "token=$(cat /var/secrets/SLACK-TOKEN)" \
+                        https://slack.com/api/files.upload;
+                  else
+                    curl -X POST https://slack.com/api/chat.postMessage \
+                      -H "Authorization: Bearer $(cat /var/secrets/SLACK-TOKEN)" \
+                      -H "Content-Type: application/json" \
+                      -d '{
+                          "channel": "#security-aws-eks",
+                          "text": "Trivy scan failed for namespace '"$ns"'."
+                      }';
+                  fi;
+                fi;
+              done;
+            volumeMounts:
+              - name: slack-secret
+                mountPath: /var/secrets
+          restartPolicy: OnFailure
+          volumes:
+            - name: slack-secret
+              secret:
+                secretName: slack-security-secret
