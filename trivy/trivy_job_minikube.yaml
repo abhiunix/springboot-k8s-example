@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trivy-k8s-scan
+  namespace: default
+spec:
+  template:
+    spec:
+      serviceAccountName: trivy-sa
+      containers:
+      - name: trivy-k8s
+        image: aquasec/trivy:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            apk add --no-cache curl && \
+            trivy k8s --report all --severity CRITICAL --format table > /tmp/trivy_k8_$(date +%Y-%m-%d_%H-%M-%S).txt && \
+            FILENAME=$(ls /tmp/trivy_k8_*.txt) && \
+            SLACK_TOKEN=$(cat /var/secrets/SLACK-TOKEN) && \
+            curl -F file=@$FILENAME -F "channels=#my-automation" -F "initial_comment=trivy_k8_result" -F "token=$SLACK_TOKEN" https://slack.com/api/files.upload
+        env:
+        - name: KUBECONFIG
+          value: /root/.kube/config
+        volumeMounts:
+          - name: kubeconfig
+            mountPath: /root/.kube
+          - name: minikube-certs
+            mountPath: /root/.minikube
+          - name: tmp-dir
+            mountPath: /tmp
+          - name: slack-secret
+            mountPath: /var/secrets
+      restartPolicy: OnFailure
+      volumes:
+        - name: kubeconfig
+          hostPath:
+            path: /Users/abhijeetsingh/.kube
+        - name: minikube-certs
+          hostPath:
+            path: /Users/abhijeetsingh/.minikube
+        - name: tmp-dir
+          emptyDir: {}
+        - name: slack-secret
+          secret:
+            secretName: slack-security-secret
