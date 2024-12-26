@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trivy-k8s-scan
+  namespace: default
+spec:
+  # activeDeadlineSeconds: 3600 # Set timeout for the Job to 10 minutes
+  # backoffLimit: 1 # Optional: Retry once if the Job fails
+  template:
+    spec:
+      serviceAccountName: trivy-sa
+      containers:
+      - name: trivy-k8s
+        image: aquasec/trivy:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache curl &&
+          trivy k8s --include-namespaces default --report all --severity CRITICAL --format table --timeout 60m > /tmp/trivy_k8_scan.txt &&
+          if [ -f /tmp/trivy_k8_scan.txt ]; then
+            curl -F file=@/tmp/trivy_k8_scan.txt \
+                -F "channels=#my-automation" \
+                -F "initial_comment=Trivy K8s Scan Results" \
+                -F "token=$(cat /var/secrets/SLACK-TOKEN)" \
+                https://slack.com/api/files.upload;
+          else
+            echo "Trivy scan failed or no results generated.";
+          fi
+        volumeMounts:
+          - name: tmp-dir
+            mountPath: /tmp
+          - name: slack-secret
+            mountPath: /var/secrets
+      restartPolicy: OnFailure
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+        - name: slack-secret
+          secret:
+            secretName: slack-security-secret
